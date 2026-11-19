@@ -1,0 +1,875 @@
+--==================================================================
+--  SIGMA HUB  |  Meme Sea
+--  Escrito do zero com base na estrutura real do jogo
+--  Farm de level, bosses, raid, Floppa, stats, TP, shop, ESP
+--==================================================================
+
+if getgenv and getgenv().SigmaHub then
+    pcall(function() getgenv().SigmaHub:Destroy() end)
+end
+
+local Players = game:GetService("Players")
+local RS = game:GetService("ReplicatedStorage")
+local VU = game:GetService("VirtualUser")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local LP = Players.LocalPlayer
+
+repeat task.wait() until game:IsLoaded()
+
+local function W(parent, name)
+    local o = parent:FindFirstChild(name)
+    if o then return o end
+    return parent:WaitForChild(name, 40)
+end
+
+--=========================== REFS ===========================
+local rsMonsterSpawn = W(RS, "MonsterSpawn")
+local Modules        = W(RS, "ModuleScript")
+local OtherEvent     = W(RS, "OtherEvent")
+local Monsters       = W(workspace, "Monster")
+local NPCs           = W(workspace, "NPCs")
+local QuestsNPC      = W(NPCs, "Quests_Npc")
+local Location       = W(workspace, "Location")
+local EnemyLocation  = W(Location, "Enemy_Location")
+local QuestLocation  = W(Location, "QuestLocaion")
+local SpawnLocations = W(Location, "SpawnLocations")
+local Island         = W(workspace, "Island")
+local Region         = W(workspace, "Region")
+
+local MainEvents = W(OtherEvent, "MainEvents")
+local QuestEvents = W(OtherEvent, "QuestEvents")
+local MiscEvents  = W(OtherEvent, "MiscEvents")
+
+local Items       = W(LP, "Items")
+local QuestFolder = W(LP, "QuestFolder")
+local AbilityF    = W(LP, "Ability")
+local PlayerData  = W(LP, "PlayerData")
+local Level       = W(PlayerData, "Level")
+local SkillPoint  = W(PlayerData, "SkillPoint")
+
+local MaxLevel = 2500
+pcall(function()
+    local S = require(Modules:WaitForChild("Setting"))
+    MaxLevel = S.Setting.MaxLevel
+end)
+
+--=========================== CONFIG ===========================
+local Config = {
+    FarmDistance   = 9,
+    Tool           = "Fight",
+    AutoAttack     = true,
+    AutoAura       = true,
+    BringMobs      = true,
+    AntiAFK        = true,
+    ESP            = false,
+    AutoStats      = false,
+    AutoStatsPts   = 1,
+    SelectedEnemy  = nil,
+    Stats          = {},
+}
+local Flags = {}
+
+local function FarmCF()
+    return CFrame.new(0, Config.FarmDistance, 0) * CFrame.Angles(math.rad(-90), 0, 0)
+end
+
+--=========================== HELPERS ===========================
+local function Alive(o)
+    local h = o and o:FindFirstChild("Humanoid")
+    return h and h.Health > 0
+end
+
+local function GoTo(cf)
+    local c = LP.Character
+    if Alive(c) then c:SetPrimaryPartCFrame(cf) end
+end
+
+local function MoveTo(cf)
+    local c = LP.Character
+    if Alive(c) then c:MoveTo(cf.p) end
+end
+
+local function Data(name)
+    local v = PlayerData:FindFirstChild(name)
+    return v and v.Value or 0
+end
+
+local function Material(name)
+    local s = Items.ItemStorage
+    local v = s:FindFirstChild(name)
+    return v and v.Value or 0
+end
+
+local function HasSword(name)
+    local w = Items.Weapon
+    local v = w:FindFirstChild(name)
+    return v and v.Value > 0
+end
+
+local function HasAbility(name)
+    local a = AbilityF:FindFirstChild(name)
+    return a and a.Value
+end
+
+local function EquipWeapon()
+    local bp, ch = LP:FindFirstChild("Backpack"), LP.Character
+    if Alive(ch) and bp then
+        for _, t in ipairs(bp:GetChildren()) do
+            if t:IsA("Tool") and t.ToolTip:find(Config.Tool) then
+                ch.Humanoid:EquipTool(t)
+            end
+        end
+    end
+end
+
+local function Attack()
+    local ch = LP.Character
+    if not ch then return end
+    if Config.AutoAttack then
+        VU:CaptureController()
+        VU:Button1Down(Vector2.new(1e4, 1e4))
+    end
+    if Config.AutoAura and HasAbility("Aura") then
+        local folder = ch:FindFirstChild("AuraColor_Folder")
+        if folder and #folder:GetChildren() < 1 then
+            pcall(function() MainEvents.Ability:InvokeServer("Aura") end)
+        end
+    end
+end
+
+local function NextEnemy(name)
+    for _, m in ipairs(Monsters:GetChildren()) do
+        if (not name or m.Name == name) and Alive(m) then return m end
+    end
+    return nil
+end
+
+local function BringMobs(name, cf, all)
+    for _, m in ipairs(Monsters:GetChildren()) do
+        if (all or m.Name == name) and Alive(m) and m.PrimaryPart then
+            if (m.PrimaryPart.Position - cf.p).Magnitude < 500 then
+                local h, pp = m:FindFirstChild("Humanoid"), m.PrimaryPart
+                h.WalkSpeed = 0
+                h:ChangeState(14)
+                pp.CFrame = cf
+                pp.CanCollide = false
+                pp.Size = Vector3.new(50, 50, 50)
+            end
+        end
+    end
+    pcall(function() sethiddenproperty(LP, "SimulationRadius", math.huge) end)
+end
+
+local function Kill(enemy, all)
+    local e = typeof(enemy) == "Instance" and enemy or NextEnemy(enemy)
+    if Alive(e) and e.PrimaryPart then
+        GoTo(e.PrimaryPart.CFrame * FarmCF())
+        EquipWeapon()
+        if not e:FindFirstChild("Reverse_Mark") then Attack() end
+        if Config.BringMobs then BringMobs(typeof(enemy) == "string" and enemy or nil, e.PrimaryPart.CFrame, all) end
+        return true
+    end
+end
+
+local function TakeQuest(npc, cf, delay)
+    local q = QuestsNPC:FindFirstChild(npc)
+    if q and LP:DistanceFromCharacter(q.WorldPivot.p) < 6 then
+        local prompt = q:FindFirstChild("Block") and q.Block:FindFirstChild("QuestPrompt")
+        if prompt then pcall(fireproximityprompt, prompt) end
+        task.wait(delay or 0.15)
+        return true
+    end
+    MoveTo(cf or QuestLocation[npc].CFrame)
+end
+
+local function ClearQuests(keep)
+    for _, q in ipairs(QuestFolder:GetChildren()) do
+        if q.QuestGiver.Value ~= keep and q.Target.Value ~= "None" then
+            pcall(function()
+                QuestEvents.Quest:FireServer("Abandon_Quest", { QuestSlot = q.Name })
+            end)
+        end
+    end
+end
+
+local function ActiveQuest()
+    for _, q in ipairs(QuestFolder:GetChildren()) do
+        if q.Target.Value ~= "None" then return q end
+    end
+end
+
+local function OnQuest(npc)
+    local q = ActiveQuest()
+    return q and q.QuestGiver.Value == npc
+end
+
+local function Summon(pos, promptPath)
+    if LP:DistanceFromCharacter(pos) < 6 then
+        local o = Island
+        for _, p in ipairs(promptPath) do
+            o = o and o:FindFirstChild(p)
+        end
+        if o then pcall(fireproximityprompt, o) end
+        return true
+    end
+    MoveTo(CFrame.new(pos))
+    return true
+end
+
+--=========================== ESP ===========================
+local espConns = {}
+local function ClearESP()
+    for _, c in ipairs(espConns) do pcall(function() c:Disconnect() end) end
+    espConns = {}
+    for _, m in ipairs(Monsters:GetChildren()) do
+        for _, ch in ipairs(m:GetChildren()) do
+            if ch.Name == "SigmaESP" or ch.Name == "SigmaHL" then ch:Destroy() end
+        end
+    end
+end
+
+local function TagESP(m)
+    if not m:IsA("Model") or not m.PrimaryPart then return end
+    local hl = Instance.new("Highlight")
+    hl.Name = "SigmaHL"
+    hl.FillColor = Color3.fromRGB(255, 60, 60)
+    hl.FillTransparency = 0.65
+    hl.OutlineColor = Color3.fromRGB(255, 255, 255)
+    hl.Parent = m
+
+    local bb = Instance.new("BillboardGui")
+    bb.Name = "SigmaESP"
+    bb.Size = UDim2.fromOffset(200, 40)
+    bb.AlwaysOnTop = true
+    bb.StudsOffsetWorldSpace = Vector3.new(0, 4, 0)
+    bb.Parent = m
+
+    local txt = Instance.new("TextLabel")
+    txt.Size = UDim2.fromScale(1, 1)
+    txt.BackgroundTransparency = 1
+    txt.Font = Enum.Font.GothamBold
+    txt.TextSize = 13
+    txt.TextColor3 = Color3.fromRGB(255, 235, 120)
+    txt.TextStrokeTransparency = 0
+    txt.Text = m.Name
+    txt.Parent = bb
+
+    table.insert(espConns, RunService.RenderStepped:Connect(function()
+        if not m.Parent then return end
+        local ch = LP.Character
+        local root = ch and ch:FindFirstChild("HumanoidRootPart")
+        if root and m.PrimaryPart then
+            txt.Text = ("%s [%d]"):format(m.Name, math.floor((m.PrimaryPart.Position - root.Position).Magnitude))
+        end
+    end))
+end
+
+local function EnableESP()
+    for _, m in ipairs(Monsters:GetChildren()) do TagESP(m) end
+    table.insert(espConns, Monsters.ChildAdded:Connect(function(m)
+        if Config.ESP then task.wait(0.2); TagESP(m) end
+    end))
+end
+
+--=========================== FARM LOOP ===========================
+local Jobs = {
+    { flag = "MemeBeast", run = function()
+        local b = Monsters:FindFirstChild("Meme Beast") or rsMonsterSpawn:FindFirstChild("Meme Beast")
+        if b then GoTo(b.WorldPivot); EquipWeapon(); Attack(); return true end
+    end },
+    { flag = "LordSus", run = function()
+        local b = Monsters:FindFirstChild("Lord Sus") or rsMonsterSpawn:FindFirstChild("Lord Sus")
+        if b then
+            if not OnQuest("Floppa Quest 32") and Level.Value >= 1550 then
+                ClearQuests("Floppa Quest 32"); TakeQuest("Floppa Quest 32", nil, 1)
+            else Kill(b) end
+            return true
+        elseif Material("Sussy Orb") > 0 then
+            return Summon(Vector3.new(6644, -95, 4811), {"ForgottenIsland", "Summon3", "Summon", "SummonPrompt"})
+        end
+    end },
+    { flag = "EvilNoob", run = function()
+        local b = Monsters:FindFirstChild("Evil Noob") or rsMonsterSpawn:FindFirstChild("Evil Noob")
+        if b then
+            if not OnQuest("Floppa Quest 29") and Level.Value >= 1400 then
+                ClearQuests("Floppa Quest 29"); TakeQuest("Floppa Quest 29", nil, 1)
+            else Kill(b) end
+            return true
+        elseif Material("Noob Head") > 0 then
+            return Summon(Vector3.new(-2356, -81, 3180), {"MoaiIsland", "Summon2", "Summon", "SummonPrompt"})
+        end
+    end },
+    { flag = "Pumpkin", run = function()
+        local b = Monsters:FindFirstChild("Giant Pumpkin") or rsMonsterSpawn:FindFirstChild("Giant Pumpkin")
+        if b then
+            if not OnQuest("Floppa Quest 23") and Level.Value >= 1100 then
+                ClearQuests("Floppa Quest 23"); TakeQuest("Floppa Quest 23", nil, 1)
+            else Kill(b) end
+            return true
+        elseif Material("Flame Orb") > 0 then
+            return Summon(Vector3.new(-1180, -93, 1462), {"PumpkinIsland", "Summon1", "Summon", "SummonPrompt"})
+        end
+    end },
+    { flag = "Floppa", run = function()
+        if HasSword("Floppa") then return end
+        if OnQuest("Cool Floppa Quest") then
+            local lava = Island:FindFirstChild("FloppaIsland") and Island.FloppaIsland:FindFirstChild("Lava Floppa")
+            if not lava then return end
+            if LP:DistanceFromCharacter(lava.WorldPivot.p) < 12 then
+                pcall(fireproximityprompt, lava.ClickPart.ProximityPrompt)
+            else MoveTo(CFrame.new(794, -31, -440)) end
+            return true
+        end
+        ClearQuests("Cool Floppa Quest")
+        TakeQuest("Cool Floppa Quest", CFrame.new(758, -31, -424))
+        return true
+    end },
+    { flag = "RaceOrb", run = function()
+        if Level.Value < 500 then return end
+        if OnQuest("Dancing Banana Quest") then
+            if Kill("Sogga") then return true end
+            MoveTo(EnemyLocation.Sogga.CFrame)
+            return true
+        end
+        ClearQuests("Dancing Banana Quest")
+        TakeQuest("Dancing Banana Quest", CFrame.new(-2620, -80, -2001))
+        return true
+    end },
+    { flag = "Raid", run = function()
+        if Level.Value < 1000 then return end
+        local map
+        for _, r in ipairs(workspace:FindFirstChild("Raids"):GetChildren()) do
+            if r.Joiners:FindFirstChild(LP.Name) then map = r break end
+        end
+        if map then
+            if map:GetAttribute("Starting") ~= 0 then
+                MiscEvents.StartRaid:FireServer("Start"); task.wait(1)
+            else
+                local e
+                for _, m in ipairs(Monsters:GetChildren()) do
+                    if m:GetAttribute("Raid_Enemy") and Alive(m) then e = m break end
+                end
+                if e then Kill(e, true) else
+                    local s = map:FindFirstChild("Spawn_Location")
+                    if s then MoveTo(s.CFrame) end
+                end
+            end
+        else
+            local area = Region:FindFirstChild("RaidArea")
+            if area then MoveTo(CFrame.new(area.Position)) end
+        end
+        return true
+    end },
+    { flag = "Selected", run = function()
+        local e = Config.SelectedEnemy
+        if not e then return end
+        local npc
+        for _, q in ipairs(QuestFolder:GetChildren()) do end
+        if Kill(e) then return true end
+        local loc = EnemyLocation:FindFirstChild(e)
+        if loc then MoveTo(loc.CFrame) end
+        return true
+    end },
+    { flag = "Level", run = function()
+        local current = ActiveQuest()
+        if current then
+            local npc = current.QuestGiver.Value
+            if Kill(current.Target.Value) then return true end
+            local loc = QuestLocation:FindFirstChild(npc)
+            if loc then MoveTo(loc.CFrame) end
+            return true
+        end
+        for _, q in ipairs(QuestFolder:GetChildren()) do end
+        -- pega a próxima quest pelo nível
+        local best
+        for _, npc in ipairs(QuestsNPC:GetChildren()) do
+            local loc = QuestLocation:FindFirstChild(npc.Name)
+            if loc and Level.Value < MaxLevel then best = npc.Name end
+        end
+        if best then TakeQuest(best) return true end
+    end },
+}
+
+local function FarmLoop()
+    while task.wait() do
+        for _, job in ipairs(Jobs) do
+            if Flags[job.flag] then
+                local ok, res = pcall(job.run)
+                if ok and res then break end
+            end
+        end
+    end
+end
+
+--=========================== AUTO STATS ===========================
+local StatMap = {
+    Power  = "MemePowerLevel",
+    Health = "DefenseLevel",
+    Weapon = "SwordLevel",
+    Melee  = "MeleeLevel",
+}
+
+local function StatsLoop()
+    while task.wait(0.6) do
+        if Config.AutoStats then
+            for label, key in pairs(StatMap) do
+                if Config.Stats[label] and SkillPoint.Value > 0 then
+                    local v = PlayerData[key]
+                    if v and v.Value < MaxLevel then
+                        pcall(function()
+                            MainEvents.StatsFunction:InvokeServer({
+                                Target = key,
+                                Action = "UpgradeStats",
+                                Amount = math.clamp(Config.AutoStatsPts, 0, MaxLevel - v.Value),
+                            })
+                        end)
+                    end
+                end
+            end
+        end
+    end
+end
+
+--=========================== UI ===========================
+local T = {
+    bg = Color3.fromRGB(14, 15, 19),
+    panel = Color3.fromRGB(20, 21, 27),
+    card = Color3.fromRGB(27, 29, 36),
+    acc = Color3.fromRGB(122, 92, 255),
+    acc2 = Color3.fromRGB(92, 205, 255),
+    txt = Color3.fromRGB(238, 238, 245),
+    sub = Color3.fromRGB(148, 152, 168),
+    green = Color3.fromRGB(72, 212, 132),
+    line = Color3.fromRGB(44, 46, 58),
+}
+
+local function N(class, props)
+    local i = Instance.new(class)
+    for k, v in pairs(props or {}) do
+        if k ~= "Parent" then i[k] = v end
+    end
+    if props and props.Parent then i.Parent = props.Parent end
+    return i
+end
+
+local function corner(p, r) return N("UICorner", { CornerRadius = UDim.new(0, r or 8), Parent = p }) end
+local function stroke(p, c, t) return N("UIStroke", { Color = c or T.line, Thickness = t or 1, Parent = p }) end
+
+local function GuiParent()
+    if gethui then return gethui() end
+    local ok, cg = pcall(function() return game:GetService("CoreGui") end)
+    if ok and cg then return cg end
+    return LP:WaitForChild("PlayerGui")
+end
+
+local gui = N("ScreenGui", {
+    Name = "SigmaHub",
+    ResetOnSpawn = false,
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+    Parent = GuiParent(),
+})
+if getgenv then getgenv().SigmaHub = gui end
+pcall(function() if syn and syn.protect_gui then syn.protect_gui(gui) end end)
+
+-- botão flutuante
+local openBtn = N("TextButton", {
+    Size = UDim2.fromOffset(52, 52),
+    Position = UDim2.new(0, 18, 0.5, -26),
+    BackgroundColor3 = T.acc,
+    Text = "Σ",
+    Font = Enum.Font.GothamBlack,
+    TextSize = 26,
+    TextColor3 = Color3.new(1, 1, 1),
+    AutoButtonColor = false,
+    Parent = gui,
+})
+corner(openBtn, 26)
+
+local main = N("Frame", {
+    Size = UDim2.fromOffset(560, 380),
+    Position = UDim2.fromScale(0.5, 0.5),
+    AnchorPoint = Vector2.new(0.5, 0.5),
+    BackgroundColor3 = T.bg,
+    BorderSizePixel = 0,
+    Parent = gui,
+})
+corner(main, 14); stroke(main, T.line, 1)
+
+local header = N("Frame", {
+    Size = UDim2.new(1, 0, 0, 46),
+    BackgroundColor3 = T.panel,
+    BorderSizePixel = 0,
+    Parent = main,
+})
+corner(header, 14)
+N("TextLabel", {
+    Size = UDim2.new(1, -110, 1, 0), Position = UDim2.fromOffset(16, 0),
+    BackgroundTransparency = 1, Text = "Σ  SIGMA HUB  •  Meme Sea",
+    Font = Enum.Font.GothamBlack, TextSize = 16, TextColor3 = T.txt,
+    TextXAlignment = Enum.TextXAlignment.Left, Parent = header,
+})
+N("TextLabel", {
+    Size = UDim2.fromOffset(90, 46), Position = UDim2.new(1, -102, 0, 0),
+    BackgroundTransparency = 1, Text = "v1.0",
+    Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = T.sub,
+    TextXAlignment = Enum.TextXAlignment.Right, Parent = header,
+})
+local closeBtn = N("TextButton", {
+    Size = UDim2.fromOffset(34, 34), Position = UDim2.new(1, -42, 0, 6),
+    BackgroundColor3 = T.card, Text = "✕", Font = Enum.Font.GothamBold,
+    TextSize = 14, TextColor3 = T.sub, AutoButtonColor = false, Parent = header,
+})
+corner(closeBtn, 8)
+
+-- arrastar
+do
+    local drag, startPos, startMouse
+    header.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            drag = true; startMouse = i.Position; startPos = main.Position
+        end
+    end)
+    UIS.InputChanged:Connect(function(i)
+        if drag and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+            local d = i.Position - startMouse
+            main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+        end
+    end)
+    UIS.InputEnded:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then drag = false end
+    end)
+end
+
+-- sidebar
+local side = N("Frame", {
+    Size = UDim2.new(0, 132, 1, -46), Position = UDim2.fromOffset(0, 46),
+    BackgroundColor3 = T.panel, BorderSizePixel = 0, Parent = main,
+})
+N("UIListLayout", { Padding = UDim.new(0, 4), Parent = side })
+N("UIPadding", { PaddingTop = UDim.new(0, 8), PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8), Parent = side })
+
+local content = N("ScrollingFrame", {
+    Size = UDim2.new(1, -144, 1, -58), Position = UDim2.fromOffset(140, 52),
+    BackgroundTransparency = 1, BorderSizePixel = 0,
+    ScrollBarThickness = 4, ScrollBarImageColor3 = T.acc,
+    CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+    Parent = main,
+})
+N("UIListLayout", { Padding = UDim.new(0, 6), Parent = content })
+
+local pages = {}
+local function Page(name)
+    local p = N("Frame", { Size = UDim2.new(1, 0, 0, 0), BackgroundTransparency = 1,
+        AutomaticSize = Enum.AutomaticSize.Y, Visible = false, Parent = content })
+    N("UIListLayout", { Padding = UDim.new(0, 6), Parent = p })
+    pages[name] = p
+    local btn = N("TextButton", {
+        Size = UDim2.new(1, 0, 0, 32), BackgroundColor3 = T.card, BorderSizePixel = 0,
+        Text = name, Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = T.sub,
+        AutoButtonColor = false, Parent = side,
+    })
+    corner(btn, 8)
+    btn.MouseButton1Click:Connect(function()
+        for _, pg in pairs(pages) do pg.Visible = false end
+        for _, b in ipairs(side:GetChildren()) do
+            if b:IsA("TextButton") then b.BackgroundColor3 = T.card; b.TextColor3 = T.sub end
+        end
+        p.Visible = true
+        btn.BackgroundColor3 = T.acc; btn.TextColor3 = Color3.new(1, 1, 1)
+    end)
+    return p
+end
+
+local function Section(parent, text)
+    N("TextLabel", {
+        Size = UDim2.new(1, 0, 0, 22), BackgroundTransparency = 1,
+        Text = text:upper(), Font = Enum.Font.GothamBlack, TextSize = 11,
+        TextColor3 = T.acc2, TextXAlignment = Enum.TextXAlignment.Left, Parent = parent,
+    })
+end
+
+local function Row(parent)
+    return N("Frame", { Size = UDim2.new(1, 0, 0, 34), BackgroundColor3 = T.card,
+        BorderSizePixel = 0, Parent = parent })
+end
+
+local function Toggle(parent, text, default, callback)
+    local row = Row(parent); corner(row, 8)
+    local state = default and true or false
+    N("TextLabel", {
+        Size = UDim2.new(1, -70, 1, 0), Position = UDim2.fromOffset(10, 0),
+        BackgroundTransparency = 1, Text = text, Font = Enum.Font.Gotham,
+        TextSize = 12, TextColor3 = T.txt, TextXAlignment = Enum.TextXAlignment.Left, Parent = row,
+    })
+    local pill = N("Frame", {
+        Size = UDim2.fromOffset(38, 18), Position = UDim2.new(1, -48, 0.5, -9),
+        BackgroundColor3 = state and T.green or T.line, Parent = row,
+    })
+    corner(pill, 9)
+    local knob = N("Frame", {
+        Size = UDim2.fromOffset(14, 14), Position = UDim2.fromOffset(state and 22 or 2, 2),
+        BackgroundColor3 = Color3.new(1, 1, 1), Parent = pill,
+    })
+    corner(knob, 7)
+    local hit = N("TextButton", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "", Parent = row })
+    hit.MouseButton1Click:Connect(function()
+        state = not state
+        TweenService:Create(knob, TweenInfo.new(0.12), { Position = UDim2.fromOffset(state and 22 or 2, 2) }):Play()
+        TweenService:Create(pill, TweenInfo.new(0.12), { BackgroundColor3 = state and T.green or T.line }):Play()
+        callback(state)
+    end)
+    return row
+end
+
+local function Button(parent, text, callback)
+    local b = N("TextButton", {
+        Size = UDim2.new(1, 0, 0, 32), BackgroundColor3 = T.card, BorderSizePixel = 0,
+        Text = text, Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = T.txt,
+        AutoButtonColor = false, Parent = parent,
+    })
+    corner(b, 8); stroke(b, T.line, 1)
+    b.MouseEnter:Connect(function() TweenService:Create(b, TweenInfo.new(0.1), { BackgroundColor3 = T.acc }):Play() end)
+    b.MouseLeave:Connect(function() TweenService:Create(b, TweenInfo.new(0.1), { BackgroundColor3 = T.card }):Play() end)
+    b.MouseButton1Click:Connect(function() pcall(callback) end)
+    return b
+end
+
+local function Dropdown(parent, text, options, callback)
+    local holder = N("Frame", { Size = UDim2.new(1, 0, 0, 32), BackgroundColor3 = T.card,
+        BorderSizePixel = 0, ClipsDescendants = true, Parent = parent })
+    corner(holder, 8)
+    local head = N("TextButton", {
+        Size = UDim2.new(1, 0, 0, 32), BackgroundTransparency = 1,
+        Text = text .. "  ▾", Font = Enum.Font.Gotham, TextSize = 12,
+        TextColor3 = T.sub, TextXAlignment = Enum.TextXAlignment.Left, Parent = holder,
+    })
+    N("UIPadding", { PaddingLeft = UDim.new(0, 10), Parent = head })
+    local open = false
+    head.MouseButton1Click:Connect(function()
+        open = not open
+        holder.Size = UDim2.new(1, 0, 0, open and (32 + math.min(#options, 6) * 24) or 32)
+    end)
+    local list = N("Frame", { Size = UDim2.new(1, 0, 0, 0), Position = UDim2.fromOffset(0, 32),
+        BackgroundTransparency = 1, AutomaticSize = Enum.AutomaticSize.Y, Parent = holder })
+    N("UIListLayout", { Padding = UDim.new(0, 2), Parent = list })
+    for _, opt in ipairs(options) do
+        local o = N("TextButton", {
+            Size = UDim2.new(1, -8, 0, 22), Position = UDim2.fromOffset(4, 0),
+            BackgroundColor3 = T.panel, Text = tostring(opt), Font = Enum.Font.Gotham,
+            TextSize = 11, TextColor3 = T.sub, AutoButtonColor = false, Parent = list,
+        })
+        corner(o, 6)
+        o.MouseButton1Click:Connect(function()
+            head.Text = tostring(opt) .. "  ▾"
+            head.TextColor3 = T.txt
+            open = false
+            holder.Size = UDim2.new(1, 0, 0, 32)
+            callback(opt)
+        end)
+    end
+    return holder
+end
+
+local function Slider(parent, text, min, max, default, callback)
+    local row = N("Frame", { Size = UDim2.new(1, 0, 0, 40), BackgroundColor3 = T.card,
+        BorderSizePixel = 0, Parent = parent })
+    corner(row, 8)
+    local label = N("TextLabel", {
+        Size = UDim2.new(1, -20, 0, 20), Position = UDim2.fromOffset(10, 2),
+        BackgroundTransparency = 1, Text = text .. ": " .. default, Font = Enum.Font.Gotham,
+        TextSize = 11, TextColor3 = T.sub, TextXAlignment = Enum.TextXAlignment.Left, Parent = row,
+    })
+    local track = N("Frame", {
+        Size = UDim2.new(1, -20, 0, 6), Position = UDim2.new(0, 10, 1, -12),
+        BackgroundColor3 = T.line, Parent = row,
+    })
+    corner(track, 3)
+    local fill = N("Frame", { Size = UDim2.fromScale((default - min) / (max - min), 1),
+        BackgroundColor3 = T.acc, Parent = track })
+    corner(fill, 3)
+    local dragging = false
+    local function set(x)
+        local rel = math.clamp((x - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1)
+        local val = math.floor(min + (max - min) * rel + 0.5)
+        fill.Size = UDim2.fromScale(rel, 1)
+        label.Text = text .. ": " .. val
+        callback(val)
+    end
+    track.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            dragging = true; set(i.Position.X)
+        end
+    end)
+    UIS.InputChanged:Connect(function(i)
+        if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+            set(i.Position.X)
+        end
+    end)
+    UIS.InputEnded:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then dragging = false end
+    end)
+end
+
+--=========================== PÁGINAS ===========================
+local pFarm = Page("Farm")
+Section(pFarm, "Farm")
+Toggle(pFarm, "Auto Farm Level", false, function(v) Flags.Level = v end)
+Toggle(pFarm, "Auto Farm Boss / Raid (prioridade)", false, function(v)
+    Flags.MemeBeast, Flags.LordSus, Flags.EvilNoob, Flags.Pumpkin = v, v, v, v
+end)
+Toggle(pFarm, "Auto Farm Inimigo Selecionado", false, function(v) Flags.Selected = v end)
+Dropdown(pFarm, "Selecionar inimigo", (function()
+    local t = {}
+    for _, m in ipairs(Monsters:GetChildren()) do t[m.Name] = true end
+    local out = {}
+    for k in pairs(t) do table.insert(out, k) end
+    table.sort(out)
+    if #out == 0 then out = { "Meme Beast", "Lord Sus", "Evil Noob", "Giant Pumpkin", "Sogga" } end
+    return out
+end)(), function(v) Config.SelectedEnemy = v end)
+Slider(pFarm, "Distância do farm", 5, 15, 9, function(v) Config.FarmDistance = v end)
+
+local pItems = Page("Itens")
+Section(pItems, "Exclusivos")
+Toggle(pItems, "Auto Floppa Sword (Lava Floppa x1000)", false, function(v) Flags.Floppa = v end)
+Toggle(pItems, "Auto Race V2 Orb (Nv 500)", false, function(v) Flags.RaceOrb = v end)
+Toggle(pItems, "Auto Raid (Nv 1000)", false, function(v) Flags.Raid = v end)
+Section(pItems, "Poderes")
+Button(pItems, "Reroll 10x Poder (Floppa Gacha)", function()
+    MainEvents.Modules:FireServer("Random_Power", { Type = "Decuple", NPCName = "Floppa Gacha", GachaType = "Money" })
+end)
+Button(pItems, "Reroll Cor de Aura (10 Gems)", function()
+    MainEvents.Modules:FireServer("Reroll_Color", "Halfed Sorcerer")
+end)
+Button(pItems, "Guardar todos os poderes", function()
+    for _, t in ipairs(LP.Backpack:GetChildren()) do
+        if t:IsA("Tool") and t.ToolTip == "Power" then
+            t.Parent = LP.Character
+            MainEvents.Modules:FireServer("Eatable_Power", { Action = "Store", Tool = t })
+            task.wait(0.15)
+        end
+    end
+end)
+
+local pStats = Page("Status")
+Section(pStats, "Distribuição")
+Slider(pStats, "Pontos por clique", 1, 100, 1, function(v) Config.AutoStatsPts = v end)
+Toggle(pStats, "Auto Stats", false, function(v) Config.AutoStats = v end)
+for _, k in ipairs({ "Power", "Health", "Weapon", "Melee" }) do
+    Toggle(pStats, "Upgrade " .. k, false, function(v) Config.Stats[k] = v end)
+end)
+
+local pTP = Page("Teleporte")
+Section(pTP, "Ilhas")
+Dropdown(pTP, "Ir para ilha", (function()
+    local t = {}
+    for _, c in ipairs(SpawnLocations:GetChildren()) do table.insert(t, c.Name) end
+    table.sort(t)
+    return t
+end)(), function(v)
+    local l = SpawnLocations:FindFirstChild(v)
+    if l then GoTo(l.CFrame) end
+end)
+Section(pTP, "NPCs de Quest")
+Dropdown(pTP, "Ir para NPC", (function()
+    local t = {}
+    for _, c in ipairs(QuestLocation:GetChildren()) do table.insert(t, c.Name) end
+    table.sort(t)
+    return t
+end)(), function(v)
+    local l = QuestLocation:FindFirstChild(v)
+    if l then GoTo(l.CFrame) end
+end)
+Section(pTP, "Bosses")
+Button(pTP, "Summon Lord Sus", function() MoveTo(CFrame.new(6644, -95, 4811)) end)
+Button(pTP, "Summon Evil Noob", function() MoveTo(CFrame.new(-2356, -81, 3180)) end)
+Button(pTP, "Summon Giant Pumpkin", function() MoveTo(CFrame.new(-1180, -93, 1462)) end)
+
+local pShop = Page("Loja")
+Section(pShop, "Abilities")
+Toggle(pShop, "Auto comprar abilities", false, function(v)
+    Flags.BuyAbilities = v
+    task.spawn(function()
+        while Flags.BuyAbilities and task.wait(1.2) do
+            if not HasAbility("Instinct") and Data("Money") >= 2500000 then
+                pcall(function() MainEvents.Modules:FireServer("Ability_Teacher", "Nugget Man") end)
+            elseif not HasAbility("FlashStep") and Data("Money") >= 100000 then
+                pcall(function() MainEvents.Modules:FireServer("Ability_Teacher", "Giga Chad") end)
+            elseif not HasAbility("Aura") and Data("Money") >= 10000000 and Material("Meme Cube") > 0 then
+                pcall(function() MainEvents.Modules:FireServer("Ability_Teacher", "Aura Master") end)
+            end
+        end
+    end)
+end)
+Section(pShop, "Armas")
+Button(pShop, "Comprar Katana ($5k)", function() MainEvents.Modules:FireServer("Weapon_Seller", "Doge") end)
+Button(pShop, "Comprar Hanger ($25k)", function() MainEvents.Modules:FireServer("Weapon_Seller", "Hanger") end)
+Button(pShop, "Comprar Flame Katana", function() MainEvents.Modules:FireServer("Weapon_Seller", "Cheems") end)
+Button(pShop, "Comprar Banana", function() MainEvents.Modules:FireServer("Weapon_Seller", "Smiling Cat") end)
+Button(pShop, "Comprar Bonk", function() MainEvents.Modules:FireServer("Weapon_Seller", "Meme Man") end)
+Button(pShop, "Comprar Pumpkin", function() MainEvents.Modules:FireServer("Weapon_Seller", "Gravestone") end)
+Section(pShop, "Time")
+Button(pShop, "Entrar no time Floppa", function() MainEvents.Modules:FireServer("Change_Team", "Floppa Recruiter") end)
+Button(pShop, "Entrar no time Cheems", function() MainEvents.Modules:FireServer("Change_Team", "Cheems Recruiter") end)
+
+local pMisc = Page("Extras")
+Section(pMisc, "Combate")
+Toggle(pMisc, "Auto Attack", true, function(v) Config.AutoAttack = v end)
+Toggle(pMisc, "Auto Aura", true, function(v) Config.AutoAura = v end)
+Toggle(pMisc, "Puxar mobs (bring)", true, function(v) Config.BringMobs = v end)
+Toggle(pMisc, "ESP de mobs", false, function(v)
+    Config.ESP = v
+    if v then EnableESP() else ClearESP() end
+end)
+Section(pMisc, "Sistema")
+Toggle(pMisc, "Anti-AFK", true, function(v) Config.AntiAFK = v end)
+Button(pMisc, "Resgatar todos os códigos", function()
+    local list = require(Modules:WaitForChild("CodeList"))
+    for code, info in pairs(list) do
+        if type(code) == "string" and type(info) == "table" and info.Status then
+            pcall(function() MainEvents.Code:InvokeServer(code) end)
+            task.wait(0.3)
+        end
+    end
+end)
+Button(pMisc, "Reunir-se ao servidor", function()
+    game:GetService("TeleportService"):Teleport(game.PlaceId, LP)
+end)
+Button(pMisc, "Reiniciar script", function()
+    gui:Destroy()
+    if getgenv then getgenv().SigmaHub = nil end
+end)
+
+-- abre a primeira página
+for _, b in ipairs(side:GetChildren()) do
+    if b:IsA("TextButton") then b:Fire("MouseButton1Click") break end
+end
+
+--=========================== EXTRAS ===========================
+task.spawn(FarmLoop)
+task.spawn(StatsLoop)
+
+task.spawn(function()
+    while task.wait(600) do
+        if Config.AntiAFK then
+            VU:CaptureController()
+            VU:ClickButton2(Vector2.new())
+        end
+    end
+end)
+
+-- animação de abrir/fechar
+local function fade(obj, toVisible)
+    obj.Visible = true
+    local tw = TweenService:Create(obj, TweenInfo.new(0.15), { BackgroundTransparency = toVisible and 0 or 1 })
+    tw:Play()
+    if not toVisible then tw.Completed:Wait(); obj.Visible = false end
+end
+
+openBtn.MouseButton1Click:Connect(function() main.Visible = true end)
+closeBtn.MouseButton1Click:Connect(function() main.Visible = false end)
+main.Visible = true
+
+print("[Sigma Hub] carregado — Meme Sea")
